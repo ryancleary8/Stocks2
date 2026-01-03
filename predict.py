@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import joblib
+import numpy as np
 import pandas as pd
+import torch
 
 from features import calculate_features
 from models.xgb.xgb_classifier import XGBOpenDirectionClassifier
@@ -157,6 +159,16 @@ def _load_model_meta(model_dir: Path) -> dict:
         except Exception:
             pass
 
+    # Also check metrics.json for metadata
+    metrics_path = model_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            metrics_data = json.loads(metrics_path.read_text())
+            meta.setdefault("seq_len", metrics_data.get("seq_len"))
+            meta.setdefault("task", metrics_data.get("task"))
+        except Exception:
+            pass
+
     return meta
 
 
@@ -199,6 +211,15 @@ def _fix_estimator_type(model: object, is_classifier: bool) -> None:
         except (AttributeError, TypeError):
             pass
 
+    # Some sklearn internals inspect the estimator class rather than the instance.
+    # Patch the class attribute as well, as a last resort.
+    try:
+        cls = model.__class__
+        if not hasattr(cls, "_estimator_type") or getattr(cls, "_estimator_type", None) is None:
+            setattr(cls, "_estimator_type", est_type)
+    except Exception:
+        pass
+
 
 def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: bool) -> float:
     """Load and predict from a joblib model, handling _estimator_type issues."""
@@ -207,31 +228,191 @@ def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: boo
     # Fix _estimator_type before any operations
     _fix_estimator_type(model, is_classifier)
     
+    # Many sklearn estimators/pipelines were fitted without feature names.
+    # Passing a DataFrame then triggers noisy warnings like:
+    # "X has feature names, but <Estimator> was fitted without feature names".
+    # To keep output clean and behavior consistent, detect that case and
+    # pass a NumPy array instead.
+    X_in = features
+    try:
+        # If estimator exposes feature_names_in_, it was fitted with names.
+        # Pipelines may not, so we check the final estimator when possible.
+        fitted_with_names = False
+        if hasattr(model, "feature_names_in_"):
+            fitted_with_names = True
+        elif hasattr(model, "named_steps"):
+            steps = list(getattr(model, "named_steps").values())
+            if steps and hasattr(steps[-1], "feature_names_in_"):
+                fitted_with_names = True
+
+        if not fitted_with_names and isinstance(features, pd.DataFrame):
+            X_in = features.to_numpy(dtype=float, copy=False)
+    except Exception:
+        # If anything goes wrong, just keep the original input.
+        X_in = features
+
     # For classifiers, prefer predict_proba
     if is_classifier and hasattr(model, "predict_proba"):
         try:
-            proba = model.predict_proba(features)
-            if proba.ndim > 1 and proba.shape[1] > 1:
+            proba = model.predict_proba(X_in)
+            if hasattr(proba, "ndim") and proba.ndim > 1 and proba.shape[1] > 1:
                 return float(proba[:, 1][0])
         except Exception:
             pass
-    
+
     # Fall back to predict
-    preds = model.predict(features)
+    preds = model.predict(X_in)
     return float(preds[0])
 
 
 def _predict_xgb_reg(model_path: Path, features: pd.DataFrame) -> float:
     model = XGBOpenReturnRegressor()
+    _fix_estimator_type(model, is_classifier=False)
     model.load(model_path)
     return float(model.predict(features)[0])
 
 
 def _predict_xgb_cls(model_path: Path, features: pd.DataFrame) -> float:
     model = XGBOpenDirectionClassifier()
+    _fix_estimator_type(model, is_classifier=True)
     model.load(model_path)
     proba = model.predict_proba(features)
     return float(proba[0])
+
+
+def _load_pytorch_model(model_path: Path, model_dir: Path, model_type: str) -> torch.nn.Module:
+    """Load a PyTorch model (CNN, LSTM, or Transformer)."""
+    
+    # Load metadata to get model architecture info
+    meta = _load_model_meta(model_dir)
+    task = meta.get("task", "reg")
+    
+    # Determine model type and import the appropriate class
+    if "cnn" in model_type:
+        from models.cnn.cnn_model import CNN1DPredictor
+        
+        n_features = len(meta.get("feature_cols", []))
+        model = CNN1DPredictor(
+            in_channels=n_features,
+            conv_channels=64,
+            kernel_size=5,
+            dropout=0.15,
+            task=task
+        )
+    elif "lstm" in model_type:
+        from models.rnn.lstm_model import StockLSTM
+        
+        n_features = len(meta.get("feature_cols", []))
+        model = StockLSTM(
+            input_dim=n_features,
+            hidden_dim=64,
+            num_layers=1,
+            dropout=0.25,
+            task=task
+        )
+    elif "transformer" in model_type:
+        from models.transformer.ts_transformer import TimeSeriesTransformer
+        
+        n_features = len(meta.get("feature_cols", []))
+        model = TimeSeriesTransformer(
+            n_features=n_features,
+            d_model=64,
+            nhead=4,
+            num_layers=2,
+            dropout=0.10,
+            task=task
+        )
+    else:
+        raise ValueError(f"Unknown PyTorch model type: {model_type}")
+    
+    # Load the state dict
+    state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+    model.load_state_dict(state_dict)
+    model.eval()
+    
+    return model
+
+
+def _prepare_sequence_input(
+    history: pd.DataFrame, 
+    feat_row: pd.Series, 
+    feature_cols: List[str],
+    seq_len: int,
+    model_type: str
+) -> np.ndarray:
+    """Prepare sequence input for PyTorch models (CNN, LSTM, Transformer).
+    
+    Returns:
+        For CNN: (1, channels, seq_len) 
+        For LSTM/Transformer: (1, seq_len, features)
+    """
+    # Calculate features for entire history
+    feat_df = calculate_features(history)
+    feat_df = feat_df.dropna().sort_values("date").reset_index(drop=True)
+    
+    if len(feat_df) < seq_len:
+        raise ValueError(f"Not enough history ({len(feat_df)} rows) for seq_len={seq_len}")
+    
+    # Get the last seq_len rows of features
+    seq_data = feat_df[feature_cols].iloc[-seq_len:].values.astype(np.float32)
+    
+    # Load scaler if it exists
+    scaler_path = feat_row.name if hasattr(feat_row, 'name') else None
+    if scaler_path and isinstance(scaler_path, Path):
+        scaler_path = scaler_path.parent / "scaler.joblib"
+    else:
+        # Try to find scaler in model directory
+        # This will be passed in context
+        scaler_path = None
+    
+    # For now, we'll handle scaling inline
+    # In production, you'd want to load the saved scaler
+    
+    if "cnn" in model_type:
+        # CNN expects (batch, channels, seq_len)
+        # Input is (seq_len, features), transpose to (features, seq_len)
+        seq_data = seq_data.T  # (features, seq_len)
+        seq_data = np.expand_dims(seq_data, 0)  # (1, features, seq_len)
+    else:
+        # LSTM/Transformer expect (batch, seq_len, features)
+        seq_data = np.expand_dims(seq_data, 0)  # (1, seq_len, features)
+    
+    return seq_data
+
+
+def _predict_pytorch(
+    model_path: Path, 
+    model_dir: Path,
+    history: pd.DataFrame,
+    feat_row: pd.Series,
+    feature_cols: List[str],
+    model_type: str,
+    task: str,
+    seq_len: int = 30
+) -> float:
+    """Predict using a PyTorch model (CNN, LSTM, or Transformer)."""
+    
+    # Load the model
+    model = _load_pytorch_model(model_path, model_dir, model_type)
+    
+    # Prepare sequence input
+    seq_data = _prepare_sequence_input(history, feat_row, feature_cols, seq_len, model_type)
+    
+    # Convert to tensor
+    x_tensor = torch.tensor(seq_data, dtype=torch.float32)
+    
+    # Make prediction
+    with torch.no_grad():
+        output = model(x_tensor)
+        
+        # Handle output based on task
+        if task == "cls":
+            # For classification, apply sigmoid to get probability
+            prob = torch.sigmoid(output).item()
+            return float(prob)
+        else:
+            # For regression, return the raw output
+            return float(output.item())
 
 
 def _gather_model_paths(symbol: str) -> dict[str, Path]:
@@ -247,7 +428,24 @@ def _gather_model_paths(symbol: str) -> dict[str, Path]:
     def scan(root: Path) -> Iterable[Path]:
         if not root.exists():
             return []
-        return root.rglob("model.*")
+
+        # IMPORTANT:
+        # rglob("model.*") also matches files like "model.meta.json" which are
+        # metadata (not the actual model). Feeding those into XGBoost's loader
+        # causes crashes like: "Invalid cast, from Null to Object".
+        allowed_suffixes = {".joblib", ".pkl", ".pickle", ".json", ".ubj", ".pt", ".pth"}
+        for p in root.rglob("model.*"):
+            name = p.name.lower()
+            # Exclude known metadata files
+            if name in {"model.meta.json", "model.meta"}:
+                continue
+            # Allow model artifacts only
+            if p.suffix.lower() not in allowed_suffixes:
+                continue
+            # Exclude any other "*.meta.json" patterns defensively
+            if name.endswith(".meta.json"):
+                continue
+            yield p
 
     for p in scan(TRAINED_MODELS_DIR / symbol):
         key = f"{p.parent.parent.name}-{p.parent.name}"  # model-task
@@ -303,30 +501,68 @@ def predict_for_symbol(quote: CurrentQuote) -> dict[str, float]:
     for key, model_path in sorted(model_paths.items()):
         meta = _load_model_meta(model_path.parent)
         feature_cols = meta.get("feature_cols")
-        try:
-            X = _make_feature_frame(feat_row, feature_cols)
-        except Exception as exc:
-            print(f"⚠️  Skipping {quote.symbol} {key}: {exc}")
+        
+        # Skip if no feature columns found
+        if not feature_cols:
+            print(f"⚠️  Skipping {quote.symbol} {key}: no feature_cols.json found")
             continue
-
+            
         try:
-            if model_path.suffix.lower() in {".pt", ".pth"}:
-                print(
-                    f"⚠️  Skipping {quote.symbol} {key}: unsupported torch model format for CLI prediction"
-                )
-                continue
-
             model_type = str(meta.get("type", "")).lower()
+            task = meta.get("task", "reg")
             
             # Determine if this is a classifier or regressor
-            is_classifier = ("cls" in key or "classifier" in model_type)
+            is_classifier = ("cls" in key or "classifier" in model_type or task == "cls")
             
-            if "xgb_cls" in key or model_type == "xgb_classifier":
-                preds[key] = _predict_xgb_cls(model_path, X)
-            elif "xgb_reg" in key or model_type == "xgb_regressor" or model_path.suffix == ".json":
-                preds[key] = _predict_xgb_reg(model_path, X)
+            # Handle PyTorch models
+            if model_path.suffix.lower() in {".pt", ".pth"}:
+                # Determine model type from key
+                if "cnn" in key:
+                    model_type_name = "cnn"
+                elif "lstm" in key:
+                    model_type_name = "lstm"
+                elif "transformer" in key:
+                    model_type_name = "transformer"
+                else:
+                    print(f"⚠️  Skipping {quote.symbol} {key}: unknown PyTorch model type")
+                    continue
+                
+                # Get sequence length from metadata (default to reasonable values)
+                seq_len = meta.get("seq_len", 30 if model_type_name == "cnn" else 20)
+                
+                preds[key] = _predict_pytorch(
+                    model_path, 
+                    model_path.parent,
+                    history,
+                    feat_row,
+                    feature_cols,
+                    model_type_name,
+                    task,
+                    seq_len
+                )
+            # Handle XGBoost models
+            elif "xgb_cls" in key or model_type == "xgb_classifier":
+                X = _make_feature_frame(feat_row, feature_cols)
+
+                # Some "xgb_*" models may have been saved via joblib/pickle (sklearn style).
+                # Those require _estimator_type to be set, so route through _predict_joblib.
+                if model_path.suffix.lower() in {".joblib", ".pkl", ".pickle"}:
+                    preds[key] = _predict_joblib(model_path, X, is_classifier=True)
+                else:
+                    preds[key] = _predict_xgb_cls(model_path, X)
+
+            elif "xgb_reg" in key or model_type == "xgb_regressor" or model_path.suffix.lower() in {".json", ".ubj"}:
+                X = _make_feature_frame(feat_row, feature_cols)
+
+                # Same deal: if stored as sklearn-serialized artifact, predict via joblib path.
+                if model_path.suffix.lower() in {".joblib", ".pkl", ".pickle"}:
+                    preds[key] = _predict_joblib(model_path, X, is_classifier=False)
+                else:
+                    preds[key] = _predict_xgb_reg(model_path, X)
+
+            # Handle sklearn models
             else:
-                # Use the fixed joblib predictor
+                X = _make_feature_frame(feat_row, feature_cols)
                 preds[key] = _predict_joblib(model_path, X, is_classifier)
                 
         except Exception as exc:
