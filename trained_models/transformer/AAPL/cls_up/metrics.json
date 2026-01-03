@@ -1,0 +1,19 @@
+{
+  "task": "cls",
+  "dataset": "data/datasets/AAPL.cls_up.dataset.csv",
+  "seq_len": 30,
+  "batch_size": 128,
+  "epochs_ran": 10,
+  "best_val_loss": 0.6978852951149056,
+  "test_loss": 0.6900531022445016,
+  "test_metrics": {
+    "acc": 0.5130434782608696,
+    "auc": 0.5061017180256341,
+    "prec_at_0.60": 0.0
+  },
+  "val_metrics_last": {
+    "acc": 0.497737556561086,
+    "auc": 0.4519829564077352,
+    "prec_at_0.60": 1.0
+  }
+}

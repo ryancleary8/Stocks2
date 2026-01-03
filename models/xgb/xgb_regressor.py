@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, RegressorMixin
 
 try:
     from xgboost import XGBRegressor
@@ -44,7 +45,7 @@ class XGBRegressorConfig:
     min_val_rows: int = 60            # ~3 months
 
 
-class XGBOpenReturnRegressor:
+class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
     """
     XGBoost regressor for next-day open return prediction.
 
@@ -54,10 +55,14 @@ class XGBOpenReturnRegressor:
       - features contain ONLY allowed (leak-free) inputs at prediction time
     """
 
+    # Explicitly set for sklearn meta-estimators that rely on this attribute
+    _estimator_type: str = "regressor"
+
     def __init__(self, config: Optional[XGBRegressorConfig] = None):
         self.cfg = config or XGBRegressorConfig()
         self.model: Optional[XGBRegressor] = None
         self.feature_cols: Optional[list[str]] = None
+        # Some sklearn utilities expect this on the instance, not just the class
         self._estimator_type = "regressor"
 
     def _time_split(
@@ -117,6 +122,10 @@ class XGBOpenReturnRegressor:
             n_jobs=self.cfg.n_jobs,
         )
 
+        # Align with sklearn expectations for meta-estimators that rely on this
+        # attribute. Some combinations of sklearn/xgboost have omitted it.
+        self.model._estimator_type = "regressor"
+
         # Early stopping API varies across xgboost versions.
         # Try the modern sklearn signature first; if unavailable, fall back to callbacks;
         # and if neither is supported, train without early stopping.
@@ -161,7 +170,7 @@ class XGBOpenReturnRegressor:
         X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         return self.model.predict(X)
 
-    def save(self, path: str | Path):
+    def save(self, path: Union[str, Path]):
         if self.model is None:
             raise RuntimeError("No model to save.")
         path = Path(path)
@@ -176,7 +185,7 @@ class XGBOpenReturnRegressor:
         }
         meta_path.write_text(pd.Series(meta).to_json(), encoding="utf-8")
 
-    def load(self, path: str | Path):
+    def load(self, path: Union[str, Path]):
         path = Path(path)
         self.model = XGBRegressor()
         self.model.load_model(str(path))

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin
 
 try:
     from xgboost import XGBClassifier
@@ -43,7 +44,7 @@ class XGBClassifierConfig:
     default_threshold: float = 0.5
 
 
-class XGBOpenDirectionClassifier:
+class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
     """
     XGBoost classifier for next-day open direction (up/down).
 
@@ -52,11 +53,14 @@ class XGBOpenDirectionClassifier:
       0 = otherwise
     """
 
+    # Explicitly set for sklearn meta-estimators that rely on this attribute
+    _estimator_type: str = "classifier"
+
     def __init__(self, config: Optional[XGBClassifierConfig] = None):
         self.cfg = config or XGBClassifierConfig()
         self.model: Optional[XGBClassifier] = None
         self.feature_cols: Optional[list[str]] = None
-        # Provide sklearn-style estimator hint for compatibility with callbacks/helpers
+        # Some sklearn utilities expect this on the instance, not just the class
         self._estimator_type = "classifier"
 
     def _time_split(
@@ -120,6 +124,11 @@ class XGBOpenDirectionClassifier:
             scale_pos_weight=scale_pos_weight,
         )
 
+        # Some sklearn utilities (e.g., check_scoring) inspect the underlying
+        # estimator's `_estimator_type`. Set it here defensively because
+        # different xgboost/sklearn combinations have varied defaults.
+        self.model._estimator_type = "classifier"
+
         fit_kwargs = {
             "eval_set": [(X_val, y_val)],
             "verbose": False,
@@ -170,7 +179,7 @@ class XGBOpenDirectionClassifier:
         p = self.predict_proba(df_or_X)
         return (p >= th).astype(int)
 
-    def save(self, path: str | Path):
+    def save(self, path: Union[str, Path]):
         if self.model is None:
             raise RuntimeError("No model to save.")
         path = Path(path)
@@ -185,7 +194,7 @@ class XGBOpenDirectionClassifier:
         }
         meta_path.write_text(pd.Series(meta).to_json(), encoding="utf-8")
 
-    def load(self, path: str | Path):
+    def load(self, path: Union[str, Path]):
         path = Path(path)
         self.model = XGBClassifier()
         self.model.load_model(str(path))

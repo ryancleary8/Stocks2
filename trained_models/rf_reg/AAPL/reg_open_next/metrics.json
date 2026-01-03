@@ -5,15 +5,15 @@
   "scoring": "neg_mean_squared_error",
   "best_params": {
     "max_depth": null,
-    "max_features": "log2",
+    "max_features": "sqrt",
     "min_samples_leaf": 1,
     "n_estimators": 200
   },
   "best_cv_score": -1018.8289473140079,
   "test_metrics": {
-    "mse": 1691.9260775442262,
-    "rmse": 41.133029034393104,
-    "mae": 33.06879523046084,
+    "mse": 1691.9260775442267,
+    "rmse": 41.13302903439311,
+    "mae": 33.06879523046086,
     "dir_acc": 1.0
   }
 }
