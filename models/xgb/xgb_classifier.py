@@ -17,6 +17,34 @@ except ImportError as e:
     ) from e
 
 
+def _ensure_estimator_type(obj: object, est_type: str) -> None:
+    """Set `_estimator_type` on an object and its class if possible."""
+
+    if obj is None:
+        return
+
+    for target in (obj, getattr(obj, "__class__", None)):
+        if target is None:
+            continue
+        try:
+            setattr(target, "_estimator_type", est_type)
+        except Exception:
+            # Some objects like xgboost.Booster don't allow attribute setting
+            pass
+
+    # Also patch an attached Booster if present; some sklearn utilities
+    # inspect nested estimators.
+    try:
+        booster = obj.get_booster()
+        for target in (booster, getattr(booster, "__class__", None)):
+            try:
+                setattr(target, "_estimator_type", est_type)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 @dataclass
 class XGBClassifierConfig:
     n_estimators: int = 4000
@@ -56,12 +84,26 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
     # Explicitly set for sklearn meta-estimators that rely on this attribute
     _estimator_type: str = "classifier"
 
+
     def __init__(self, config: Optional[XGBClassifierConfig] = None):
         self.cfg = config or XGBClassifierConfig()
         self.model: Optional[XGBClassifier] = None
         self.feature_cols: Optional[list[str]] = None
-        # Some sklearn utilities expect this on the instance, not just the class
-        self._estimator_type = "classifier"
+        _ensure_estimator_type(self, "classifier")
+
+    def __sklearn_tags__(self) -> dict[str, object]:
+        """
+        Expose correct estimator type for scikit-learn tooling.
+        """
+        # Base tags from ClassifierMixin if available
+        try:
+            tags = super().__sklearn_tags__()  # type: ignore[attr-defined]
+        except Exception:
+            tags = {}
+
+        # Explicitly set classifier type
+        tags["estimator_type"] = "classifier"
+        return tags
 
     def _time_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -87,47 +129,95 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
 
         return X_train, X_val, y_train, y_val
 
-    def fit(self, df: pd.DataFrame, target_col: str, feature_cols: Optional[list[str]] = None):
-        if feature_cols is None:
-            drop = {target_col, "date", "symbol", "ticker"}
-            feature_cols = [c for c in df.columns if c not in drop]
-        self.feature_cols = feature_cols
+    def fit(
+        self,
+        X,
+        y: Optional[Union[pd.Series, np.ndarray, str]] = None,
+        feature_cols: Optional[list[str]] = None,
+        target_col: Optional[str] = None,
+    ):
+        """
+        Train the classifier.
 
-        X = df[feature_cols].copy()
-        y = df[target_col].astype(int).copy()
+        Supports both the legacy signature ``fit(df, target_col, feature_cols=None)``
+        and the sklearn-style ``fit(X, y)``.
+        """
 
-        X = X.replace([np.inf, -np.inf], np.nan)
-        mask = ~(X.isna().any(axis=1) | y.isna())
-        X, y = X.loc[mask], y.loc[mask]
+        # Legacy signature: fit(df, target_col, feature_cols=None)
+        if isinstance(X, pd.DataFrame) and (isinstance(y, str) or target_col):
+            target_col = target_col or y  # type: ignore[assignment]
+            if target_col is None:
+                raise ValueError("target_col must be provided for dataframe training")
+            if feature_cols is None:
+                drop = {target_col, "date", "symbol", "ticker"}
+                feature_cols = [c for c in X.columns if c not in drop]
+            self.feature_cols = feature_cols
 
-        X_train, X_val, y_train, y_val = self._time_split(X, y)
+            X_df = X[feature_cols].copy()
+            y_series = X[target_col].astype(int).copy()
 
-        # Handle imbalance (optional but good): scale_pos_weight = neg/pos in train
-        pos = (y_train == 1).sum()
-        neg = (y_train == 0).sum()
-        scale_pos_weight = float(neg / max(pos, 1))
+            X_df = X_df.replace([np.inf, -np.inf], np.nan)
+            mask = ~(X_df.isna().any(axis=1) | y_series.isna())
+            X_df, y_series = X_df.loc[mask], y_series.loc[mask]
 
-        self.model = XGBClassifier(
-            n_estimators=self.cfg.n_estimators,
-            learning_rate=self.cfg.learning_rate,
-            max_depth=self.cfg.max_depth,
-            min_child_weight=self.cfg.min_child_weight,
-            subsample=self.cfg.subsample,
-            colsample_bytree=self.cfg.colsample_bytree,
-            reg_alpha=self.cfg.reg_alpha,
-            reg_lambda=self.cfg.reg_lambda,
-            gamma=self.cfg.gamma,
-            objective=self.cfg.objective,
-            eval_metric=self.cfg.eval_metric,
-            random_state=self.cfg.random_state,
-            n_jobs=self.cfg.n_jobs,
-            scale_pos_weight=scale_pos_weight,
-        )
+            X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
 
-        # Some sklearn utilities (e.g., check_scoring) inspect the underlying
-        # estimator's `_estimator_type`. Set it here defensively because
-        # different xgboost/sklearn combinations have varied defaults.
-        self.model._estimator_type = "classifier"
+            pos = (y_train == 1).sum()
+            neg = (y_train == 0).sum()
+            scale_pos_weight = float(neg / max(pos, 1))
+
+            self.model = XGBClassifier(
+                n_estimators=self.cfg.n_estimators,
+                learning_rate=self.cfg.learning_rate,
+                max_depth=self.cfg.max_depth,
+                min_child_weight=self.cfg.min_child_weight,
+                subsample=self.cfg.subsample,
+                colsample_bytree=self.cfg.colsample_bytree,
+                reg_alpha=self.cfg.reg_alpha,
+                reg_lambda=self.cfg.reg_lambda,
+                gamma=self.cfg.gamma,
+                objective=self.cfg.objective,
+                eval_metric=self.cfg.eval_metric,
+                random_state=self.cfg.random_state,
+                n_jobs=self.cfg.n_jobs,
+                scale_pos_weight=scale_pos_weight,
+            )
+        else:
+            # Sklearn-style signature: fit(X, y)
+            if y is None:
+                raise ValueError("y must be provided when using sklearn-style fit")
+
+            X_df = pd.DataFrame(X)
+            if feature_cols is None:
+                feature_cols = list(X_df.columns)
+            self.feature_cols = feature_cols
+            X_df = X_df[self.feature_cols]
+
+            y_series = pd.Series(y).astype(int)
+            X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
+
+            pos = (y_train == 1).sum()
+            neg = (y_train == 0).sum()
+            scale_pos_weight = float(neg / max(pos, 1))
+
+            self.model = XGBClassifier(
+                n_estimators=self.cfg.n_estimators,
+                learning_rate=self.cfg.learning_rate,
+                max_depth=self.cfg.max_depth,
+                min_child_weight=self.cfg.min_child_weight,
+                subsample=self.cfg.subsample,
+                colsample_bytree=self.cfg.colsample_bytree,
+                reg_alpha=self.cfg.reg_alpha,
+                reg_lambda=self.cfg.reg_lambda,
+                gamma=self.cfg.gamma,
+                objective=self.cfg.objective,
+                eval_metric=self.cfg.eval_metric,
+                random_state=self.cfg.random_state,
+                n_jobs=self.cfg.n_jobs,
+                scale_pos_weight=scale_pos_weight,
+            )
+
+        _ensure_estimator_type(self.model, "classifier")
 
         fit_kwargs = {
             "eval_set": [(X_val, y_val)],
@@ -135,7 +225,6 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
         }
 
         try:
-            # xgboost<2.0 supported early_stopping_rounds directly in fit
             self.model.fit(
                 X_train,
                 y_train,
@@ -144,7 +233,6 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
             )
         except TypeError:
             try:
-                # xgboost>=2.0 requires callbacks for early stopping
                 from xgboost.callback import EarlyStopping  # type: ignore
 
                 self.model.fit(
@@ -158,7 +246,6 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
                     **fit_kwargs,
                 )
             except Exception:
-                # Fallback: train without early stopping if callbacks are unavailable
                 self.model.fit(
                     X_train,
                     y_train,
@@ -170,14 +257,25 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
     def predict_proba(self, df_or_X: pd.DataFrame) -> np.ndarray:
         if self.model is None or self.feature_cols is None:
             raise RuntimeError("Model not fitted yet.")
-        X = df_or_X[self.feature_cols].copy() if set(self.feature_cols).issubset(df_or_X.columns) else df_or_X
+        _ensure_estimator_type(self.model, "classifier")
+        _ensure_estimator_type(self, "classifier")
+        X = (
+            df_or_X[self.feature_cols].copy()
+            if isinstance(df_or_X, pd.DataFrame)
+            and set(self.feature_cols).issubset(df_or_X.columns)
+            else pd.DataFrame(df_or_X, columns=self.feature_cols)
+        )
         X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        return self.model.predict_proba(X)[:, 1]  # P(up)
+        proba = self.model.predict_proba(X)
+        if getattr(proba, "ndim", 1) == 1:
+            proba = np.column_stack([1 - proba, proba])
+        return proba
 
     def predict(self, df_or_X: pd.DataFrame, threshold: Optional[float] = None) -> np.ndarray:
         th = self.cfg.default_threshold if threshold is None else threshold
-        p = self.predict_proba(df_or_X)
-        return (p >= th).astype(int)
+        proba = self.predict_proba(df_or_X)
+        positive = proba[:, 1] if proba.ndim > 1 else proba
+        return (positive >= th).astype(int)
 
     def save(self, path: Union[str, Path]):
         if self.model is None:
@@ -196,10 +294,20 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
 
     def load(self, path: Union[str, Path]):
         path = Path(path)
+
+        # Load underlying XGBClassifier model
         self.model = XGBClassifier()
         self.model.load_model(str(path))
 
+        # Ensure sklearn sees both wrapper & internal model as classifiers
+        _ensure_estimator_type(self, "classifier")
+        _ensure_estimator_type(self.model, "classifier")
+
+        # Load feature columns from metadata
         meta_path = path.with_suffix(".meta.json")
         meta = pd.read_json(meta_path.read_text(encoding="utf-8"), typ="series")
         self.feature_cols = list(meta["feature_cols"])
+
+        # Tag self again after loading metadata
+        _ensure_estimator_type(self, "classifier")
         return self

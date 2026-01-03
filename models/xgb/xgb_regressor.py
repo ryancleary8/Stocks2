@@ -17,6 +17,34 @@ except ImportError as e:
     ) from e
 
 
+def _ensure_estimator_type(obj: object, est_type: str) -> None:
+    """Set `_estimator_type` on an object and its class if possible."""
+
+    if obj is None:
+        return
+
+    for target in (obj, getattr(obj, "__class__", None)):
+        if target is None:
+            continue
+        try:
+            setattr(target, "_estimator_type", est_type)
+        except Exception:
+            # Some objects like xgboost.Booster don't allow attribute setting
+            pass
+
+    # Also patch an attached Booster if present; some sklearn utilities
+    # inspect nested estimators.
+    try:
+        booster = obj.get_booster()
+        for target in (booster, getattr(booster, "__class__", None)):
+            try:
+                setattr(target, "_estimator_type", est_type)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 @dataclass
 class XGBRegressorConfig:
     # Core
@@ -62,8 +90,7 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
         self.cfg = config or XGBRegressorConfig()
         self.model: Optional[XGBRegressor] = None
         self.feature_cols: Optional[list[str]] = None
-        # Some sklearn utilities expect this on the instance, not just the class
-        self._estimator_type = "regressor"
+        _ensure_estimator_type(self, "regressor")
 
     def _time_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -89,53 +116,92 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
 
         return X_train, X_val, y_train, y_val
 
-    def fit(self, df: pd.DataFrame, target_col: str, feature_cols: Optional[list[str]] = None):
-        if feature_cols is None:
-            # Default: everything except target/date/symbol-ish columns
-            drop = {target_col, "date", "symbol", "ticker"}
-            feature_cols = [c for c in df.columns if c not in drop]
-        self.feature_cols = feature_cols
+    def fit(
+        self,
+        X,
+        y: Optional[Union[pd.Series, np.ndarray, str]] = None,
+        feature_cols: Optional[list[str]] = None,
+        target_col: Optional[str] = None,
+    ):
+        """
+        Train the regressor.
 
-        X = df[feature_cols].copy()
-        y = df[target_col].astype(float).copy()
+        Supports both the legacy signature ``fit(df, target_col, feature_cols=None)``
+        and the sklearn-style ``fit(X, y)``.
+        """
 
-        # Replace inf, drop NaNs (after your rolling windows)
-        X = X.replace([np.inf, -np.inf], np.nan)
-        mask = ~(X.isna().any(axis=1) | y.isna())
-        X, y = X.loc[mask], y.loc[mask]
+        # Legacy signature: fit(df, target_col, feature_cols=None)
+        if isinstance(X, pd.DataFrame) and (isinstance(y, str) or target_col):
+            target_col = target_col or y  # type: ignore[assignment]
+            if target_col is None:
+                raise ValueError("target_col must be provided for dataframe training")
+            if feature_cols is None:
+                drop = {target_col, "date", "symbol", "ticker"}
+                feature_cols = [c for c in X.columns if c not in drop]
+            self.feature_cols = feature_cols
 
-        X_train, X_val, y_train, y_val = self._time_split(X, y)
+            X_df = X[feature_cols].copy()
+            y_series = X[target_col].astype(float).copy()
 
-        self.model = XGBRegressor(
-            n_estimators=self.cfg.n_estimators,
-            learning_rate=self.cfg.learning_rate,
-            max_depth=self.cfg.max_depth,
-            min_child_weight=self.cfg.min_child_weight,
-            subsample=self.cfg.subsample,
-            colsample_bytree=self.cfg.colsample_bytree,
-            reg_alpha=self.cfg.reg_alpha,
-            reg_lambda=self.cfg.reg_lambda,
-            gamma=self.cfg.gamma,
-            objective=self.cfg.objective,
-            eval_metric=self.cfg.eval_metric,
-            random_state=self.cfg.random_state,
-            n_jobs=self.cfg.n_jobs,
-        )
+            X_df = X_df.replace([np.inf, -np.inf], np.nan)
+            mask = ~(X_df.isna().any(axis=1) | y_series.isna())
+            X_df, y_series = X_df.loc[mask], y_series.loc[mask]
 
-        # Align with sklearn expectations for meta-estimators that rely on this
-        # attribute. Some combinations of sklearn/xgboost have omitted it.
-        self.model._estimator_type = "regressor"
+            X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
 
-        # Early stopping API varies across xgboost versions.
-        # Try the modern sklearn signature first; if unavailable, fall back to callbacks;
-        # and if neither is supported, train without early stopping.
+            self.model = XGBRegressor(
+                n_estimators=self.cfg.n_estimators,
+                learning_rate=self.cfg.learning_rate,
+                max_depth=self.cfg.max_depth,
+                min_child_weight=self.cfg.min_child_weight,
+                subsample=self.cfg.subsample,
+                colsample_bytree=self.cfg.colsample_bytree,
+                reg_alpha=self.cfg.reg_alpha,
+                reg_lambda=self.cfg.reg_lambda,
+                gamma=self.cfg.gamma,
+                objective=self.cfg.objective,
+                eval_metric=self.cfg.eval_metric,
+                random_state=self.cfg.random_state,
+                n_jobs=self.cfg.n_jobs,
+            )
+        else:
+            # Sklearn-style signature: fit(X, y)
+            if y is None:
+                raise ValueError("y must be provided when using sklearn-style fit")
+
+            X_df = pd.DataFrame(X)
+            if feature_cols is None:
+                feature_cols = list(X_df.columns)
+            self.feature_cols = feature_cols
+            X_df = X_df[self.feature_cols]
+
+            y_series = pd.Series(y).astype(float)
+            X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
+
+            self.model = XGBRegressor(
+                n_estimators=self.cfg.n_estimators,
+                learning_rate=self.cfg.learning_rate,
+                max_depth=self.cfg.max_depth,
+                min_child_weight=self.cfg.min_child_weight,
+                subsample=self.cfg.subsample,
+                colsample_bytree=self.cfg.colsample_bytree,
+                reg_alpha=self.cfg.reg_alpha,
+                reg_lambda=self.cfg.reg_lambda,
+                gamma=self.cfg.gamma,
+                objective=self.cfg.objective,
+                eval_metric=self.cfg.eval_metric,
+                random_state=self.cfg.random_state,
+                n_jobs=self.cfg.n_jobs,
+            )
+
+        _ensure_estimator_type(self.model, "regressor")
+
         fit_kwargs: Dict[str, object] = {
             "eval_set": [(X_val, y_val)],
             "verbose": False,
         }
 
         try:
-            # Many versions support this directly
             self.model.fit(
                 X_train,
                 y_train,
@@ -144,7 +210,6 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
             )
         except TypeError:
             try:
-                # Some versions require callbacks instead
                 from xgboost.callback import EarlyStopping  # type: ignore
 
                 self.model.fit(
@@ -154,7 +219,6 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
                     **fit_kwargs,
                 )
             except Exception:
-                # As a last resort, fit without early stopping
                 self.model.fit(
                     X_train,
                     y_train,
@@ -166,6 +230,8 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
     def predict(self, df_or_X: pd.DataFrame) -> np.ndarray:
         if self.model is None or self.feature_cols is None:
             raise RuntimeError("Model not fitted yet.")
+        _ensure_estimator_type(self.model, "regressor")
+        _ensure_estimator_type(self, "regressor")
         X = df_or_X[self.feature_cols].copy() if set(self.feature_cols).issubset(df_or_X.columns) else df_or_X
         X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         return self.model.predict(X)
@@ -190,8 +256,11 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
         self.model = XGBRegressor()
         self.model.load_model(str(path))
 
+        _ensure_estimator_type(self.model, "regressor")
+
         meta_path = path.with_suffix(".meta.json")
         meta = pd.read_json(meta_path.read_text(encoding="utf-8"), typ="series")
         self.feature_cols = list(meta["feature_cols"])
         # config rehydration is optional; keep current cfg
+        _ensure_estimator_type(self, "regressor")
         return self

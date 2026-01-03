@@ -172,51 +172,52 @@ def _load_model_meta(model_dir: Path) -> dict:
     return meta
 
 
-def _fix_estimator_type(model: object, is_classifier: bool) -> None:
-    """Forcefully set _estimator_type on a model object.
-    
-    This handles cases where models were saved without proper sklearn mixins.
-    We try multiple approaches to ensure the attribute sticks.
+def _ensure_estimator_type(model: object, is_classifier: bool) -> None:
+    """Best-effort patching of ``_estimator_type`` on estimators and containers.
+
+    This mirrors the helper inside the XGBoost wrappers but is defensive for
+    arbitrary sklearn objects, pipelines, and nested boosters. Any failures are
+    swallowed so prediction can continue.
     """
-    est_type = "classifier" if is_classifier else "regressor"
-    
-    # If it's a Pipeline, fix the final estimator
-    if hasattr(model, 'named_steps'):
-        # It's a Pipeline - fix the last step
-        steps = list(model.named_steps.values())
-        if steps:
-            final_estimator = steps[-1]
-            _fix_estimator_type(final_estimator, is_classifier)
-            # Also set on the pipeline itself
-            model._estimator_type = est_type
+
+    if model is None:
         return
-    
-    # For non-pipeline models
-    if not hasattr(model, '_estimator_type') or model._estimator_type is None:
-        # Try setting via __dict__ first (most reliable)
+
+    est_type = "classifier" if is_classifier else "regressor"
+
+    def _set(target: object) -> None:
+        if target is None:
+            return
+        for attr_target in (target, getattr(target, "__class__", None)):
+            if attr_target is None:
+                continue
+            try:
+                setattr(attr_target, "_estimator_type", est_type)
+            except Exception:
+                pass
+
+    _set(model)
+
+    # Pipelines store steps in named_steps/steps; patch each component so
+    # downstream "is_classifier" checks don't choke on internals.
+    if hasattr(model, "named_steps"):
         try:
-            model.__dict__['_estimator_type'] = est_type
-        except (AttributeError, TypeError):
+            steps = list(getattr(model, "named_steps").values())
+            for step in steps:
+                _ensure_estimator_type(step, is_classifier)
+        except Exception:
             pass
-        
-        # Try setattr
+    elif hasattr(model, "steps"):
         try:
-            object.__setattr__(model, '_estimator_type', est_type)
-        except (AttributeError, TypeError):
-            pass
-        
-        # Try direct attribute assignment
-        try:
-            model._estimator_type = est_type
-        except (AttributeError, TypeError):
+            for _name, step in getattr(model, "steps"):
+                _ensure_estimator_type(step, is_classifier)
+        except Exception:
             pass
 
-    # Some sklearn internals inspect the estimator class rather than the instance.
-    # Patch the class attribute as well, as a last resort.
+    # Some XGBoost sklearn classes expose a booster that also needs patching.
     try:
-        cls = model.__class__
-        if not hasattr(cls, "_estimator_type") or getattr(cls, "_estimator_type", None) is None:
-            setattr(cls, "_estimator_type", est_type)
+        booster = model.get_booster()
+        _set(booster)
     except Exception:
         pass
 
@@ -224,9 +225,9 @@ def _fix_estimator_type(model: object, is_classifier: bool) -> None:
 def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: bool) -> float:
     """Load and predict from a joblib model, handling _estimator_type issues."""
     model = joblib.load(model_path)
-    
+
     # Fix _estimator_type before any operations
-    _fix_estimator_type(model, is_classifier)
+    _ensure_estimator_type(model, is_classifier)
     
     # Many sklearn estimators/pipelines were fitted without feature names.
     # Passing a DataFrame then triggers noisy warnings like:
@@ -267,15 +268,17 @@ def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: boo
 
 def _predict_xgb_reg(model_path: Path, features: pd.DataFrame) -> float:
     model = XGBOpenReturnRegressor()
-    _fix_estimator_type(model, is_classifier=False)
     model.load(model_path)
+    _ensure_estimator_type(model, is_classifier=False)
+    _ensure_estimator_type(getattr(model, "model", None), is_classifier=False)
     return float(model.predict(features)[0])
 
 
 def _predict_xgb_cls(model_path: Path, features: pd.DataFrame) -> float:
     model = XGBOpenDirectionClassifier()
-    _fix_estimator_type(model, is_classifier=True)
     model.load(model_path)
+    _ensure_estimator_type(model, is_classifier=True)
+    _ensure_estimator_type(getattr(model, "model", None), is_classifier=True)
     proba = model.predict_proba(features)
     return float(proba[0])
 
