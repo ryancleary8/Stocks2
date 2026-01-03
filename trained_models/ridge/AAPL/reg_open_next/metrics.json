@@ -1,0 +1,28 @@
+{
+  "dataset": "data/datasets/AAPL.reg_open_next.dataset.csv",
+  "train_ratio": 0.8,
+  "tscv_splits": 5,
+  "alpha_grid": [
+    0.1,
+    1.0,
+    10.0,
+    100.0
+  ],
+  "with_scaler": true,
+  "best_params": {
+    "ridge__alpha": 0.1
+  },
+  "best_cv_score": -5.369388963405337,
+  "test_metrics": {
+    "mse": 17.829839490085543,
+    "rmse": 4.222539459861275,
+    "mae": 2.810025658816068,
+    "dir_acc": 1.0
+  },
+  "baseline_zero_metrics": {
+    "mse": 49074.71584262726,
+    "rmse": 221.5281378123945,
+    "mae": 219.65833867735472,
+    "dir_acc": 0.0
+  }
+}
