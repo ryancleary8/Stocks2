@@ -58,6 +58,7 @@ class XGBOpenReturnRegressor:
         self.cfg = config or XGBRegressorConfig()
         self.model: Optional[XGBRegressor] = None
         self.feature_cols: Optional[list[str]] = None
+        self._estimator_type = "regressor"
 
     def _time_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -119,7 +120,7 @@ class XGBOpenReturnRegressor:
         # Early stopping API varies across xgboost versions.
         # Try the modern sklearn signature first; if unavailable, fall back to callbacks;
         # and if neither is supported, train without early stopping.
-        fit_kwargs = {
+        fit_kwargs: Dict[str, object] = {
             "eval_set": [(X_val, y_val)],
             "verbose": False,
         }

@@ -56,6 +56,8 @@ class XGBOpenDirectionClassifier:
         self.cfg = config or XGBClassifierConfig()
         self.model: Optional[XGBClassifier] = None
         self.feature_cols: Optional[list[str]] = None
+        # Provide sklearn-style estimator hint for compatibility with callbacks/helpers
+        self._estimator_type = "classifier"
 
     def _time_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -118,13 +120,41 @@ class XGBOpenDirectionClassifier:
             scale_pos_weight=scale_pos_weight,
         )
 
-        self.model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-            early_stopping_rounds=self.cfg.early_stopping_rounds,
-        )
+        fit_kwargs = {
+            "eval_set": [(X_val, y_val)],
+            "verbose": False,
+        }
+
+        try:
+            # xgboost<2.0 supported early_stopping_rounds directly in fit
+            self.model.fit(
+                X_train,
+                y_train,
+                early_stopping_rounds=self.cfg.early_stopping_rounds,
+                **fit_kwargs,
+            )
+        except TypeError:
+            try:
+                # xgboost>=2.0 requires callbacks for early stopping
+                from xgboost.callback import EarlyStopping  # type: ignore
+
+                self.model.fit(
+                    X_train,
+                    y_train,
+                    callbacks=[
+                        EarlyStopping(
+                            rounds=self.cfg.early_stopping_rounds, save_best=True
+                        )
+                    ],
+                    **fit_kwargs,
+                )
+            except Exception:
+                # Fallback: train without early stopping if callbacks are unavailable
+                self.model.fit(
+                    X_train,
+                    y_train,
+                    **fit_kwargs,
+                )
 
         return self
 
