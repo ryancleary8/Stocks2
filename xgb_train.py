@@ -75,9 +75,15 @@ def _ensure_dir(p: Path) -> Path:
     return p
 
 
+def _stock_model_dir(symbol: str, model: str, task_key: str) -> Path:
+    """Return the output directory organized by stock first."""
+
+    return _ensure_dir(TRAINED_MODELS_DIR / symbol / model / task_key)
+
+
 def _train_xgb_classifier(ds: Path, symbol: str, task_key: str, cfg_cls: Any, model_cls: Any) -> dict[str, Any]:
     logger.info("[CLS] %s %s -> starting", symbol, task_key)
-    out_dir = _ensure_dir(TRAINED_MODELS_DIR / "xgb_cls" / symbol / task_key)
+    out_dir = _stock_model_dir(symbol, "xgb_cls", task_key)
     df = _load_df(ds)
     model = model_cls(cfg_cls())
     model.fit(df, target_col="y")
@@ -89,7 +95,7 @@ def _train_xgb_classifier(ds: Path, symbol: str, task_key: str, cfg_cls: Any, mo
 
 def _train_xgb_regressor(ds: Path, symbol: str, task_key: str, cfg_cls: Any, model_cls: Any) -> dict[str, Any]:
     logger.info("[REG] %s %s -> starting", symbol, task_key)
-    out_dir = _ensure_dir(TRAINED_MODELS_DIR / "xgb_reg" / symbol / task_key)
+    out_dir = _stock_model_dir(symbol, "xgb_reg", task_key)
     df = _load_df(ds)
     model = model_cls(cfg_cls())
     model.fit(df, target_col="y")

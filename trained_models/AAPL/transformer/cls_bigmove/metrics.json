@@ -1,0 +1,19 @@
+{
+  "task": "cls",
+  "dataset": "data/datasets/AAPL.cls_bigmove.dataset.csv",
+  "seq_len": 30,
+  "batch_size": 128,
+  "epochs_ran": 6,
+  "best_val_loss": 0.6617175251650055,
+  "test_loss": 0.6698512396950652,
+  "test_metrics": {
+    "acc": 0.6057971014492753,
+    "auc": 0.6058298137506059,
+    "prec_at_0.60": 0.9090909090909091
+  },
+  "val_metrics_last": {
+    "acc": 0.6018099547511312,
+    "auc": 0.6299555707450444,
+    "prec_at_0.60": 0.25
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "dataset": "data/datasets/AAPL.cls_up.dataset.csv",
+  "train_ratio": 0.8,
+  "tscv_splits": 4,
+  "scoring": "roc_auc",
+  "best_params": {
+    "learning_rate": 0.05,
+    "max_depth": 3,
+    "min_samples_leaf": 3,
+    "n_estimators": 200,
+    "subsample": 0.8
+  },
+  "best_cv_score": 0.5489326332126834,
+  "thresholds": {
+    "thr_long": 0.6,
+    "thr_short": 0.4
+  },
+  "test_metrics": {
+    "accuracy": 0.46092184368737477,
+    "precision": 0.52,
+    "recall": 0.04814814814814815,
+    "f1": 0.08813559322033898,
+    "auc": 0.49940158499110465,
+    "confusion_matrix": [
+      [
+        217,
+        12
+      ],
+      [
+        257,
+        13
+      ]
+    ],
+    "thr_long": 0.6
+  }
+}

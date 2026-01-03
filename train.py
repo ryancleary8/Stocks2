@@ -6,7 +6,8 @@ This script loops through each stock symbol listed in ``stocks.txt`` and trains
 all available model architectures using pre-built datasets in ``data/datasets``.
 
 - Datasets are assumed to already exist. If a symbol has no datasets, it is skipped.
-- Outputs are written to ``trained_models/{model}/{symbol}/{task_key}/``.
+- Outputs are written to ``trained_models/{symbol}/{model}/{task_key}/`` so all
+  artifacts for a given stock live under a single folder.
 
 Supported model families (when present in your repo):
   - Logistic Regression (classification)
@@ -120,6 +121,16 @@ def _ensure_dir(p: Path) -> Path:
     return p
 
 
+def _stock_model_dir(symbol: str, model: str, task_key: str) -> Path:
+    """Return the output directory for a stock/model/task triple.
+
+    Directories are organized by stock first so that all artifacts for a symbol
+    live under ``trained_models/{symbol}``.
+    """
+
+    return _ensure_dir(TRAINED_MODELS_DIR / symbol / model / task_key)
+
+
 def train_for_symbol(symbol: str) -> None:
     symbol = symbol.upper().strip()
     datasets = collect_symbol_datasets(symbol)
@@ -202,7 +213,7 @@ def train_for_symbol(symbol: str) -> None:
     def _train_xgb_cls(ds: Path, _task: str, task_key: str) -> dict[str, Any]:
         if XGBOpenDirectionClassifier is None or xgb_cls_cfg is None:
             raise RuntimeError("XGBoost classifier module not available")
-        out_dir = _ensure_dir(TRAINED_MODELS_DIR / "xgb_cls" / symbol / task_key)
+        out_dir = _stock_model_dir(symbol, "xgb_cls", task_key)
         df = _load_df(ds)
         model = XGBOpenDirectionClassifier(xgb_cls_cfg)
         model.fit(df, target_col="y")
@@ -213,7 +224,7 @@ def train_for_symbol(symbol: str) -> None:
     def _train_xgb_reg(ds: Path, _task: str, task_key: str) -> dict[str, Any]:
         if XGBOpenReturnRegressor is None or xgb_reg_cfg is None:
             raise RuntimeError("XGBoost regressor module not available")
-        out_dir = _ensure_dir(TRAINED_MODELS_DIR / "xgb_reg" / symbol / task_key)
+        out_dir = _stock_model_dir(symbol, "xgb_reg", task_key)
         df = _load_df(ds)
         model = XGBOpenReturnRegressor(xgb_reg_cfg)
         model.fit(df, target_col="y")
@@ -233,7 +244,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"reg", "cls"},
                 lambda ds, task, task_key: train_cnn(
                     dataset_csv=ds,
-                    out_dir=TRAINED_MODELS_DIR / "cnn" / symbol / task_key,
+                    out_dir=_stock_model_dir(symbol, "cnn", task_key),
                     task=task,
                     cfg=cnn_cfg,
                     model_kwargs={"conv_channels": 64, "kernel_size": 5, "dropout": 0.15},
@@ -250,7 +261,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"reg", "cls"},
                 lambda ds, task, task_key: train_lstm(
                     dataset_csv=ds,
-                    out_dir=TRAINED_MODELS_DIR / "lstm" / symbol / task_key,
+                    out_dir=_stock_model_dir(symbol, "lstm", task_key),
                     task=task,
                     cfg=lstm_cfg,
                     model_kwargs={"hidden_dim": 64, "num_layers": 1, "dropout": 0.25},
@@ -267,7 +278,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"cls"},
                 lambda ds, task, task_key: train_gbc(
                     ds,
-                    TRAINED_MODELS_DIR / "gbc" / symbol / task_key,
+                    _stock_model_dir(symbol, "gbc", task_key),
                     cfg=gbc_cfg,
                     scoring="roc_auc",
                 ),
@@ -283,7 +294,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"cls"},
                 lambda ds, task, task_key: train_logreg(
                     ds,
-                    TRAINED_MODELS_DIR / "logreg" / symbol / task_key,
+                    _stock_model_dir(symbol, "logreg", task_key),
                     cfg=logreg_cfg,
                 ),
             )
@@ -298,7 +309,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"reg"},
                 lambda ds, task, task_key: train_ridge_regressor(
                     ds,
-                    TRAINED_MODELS_DIR / "ridge" / symbol / task_key,
+                    _stock_model_dir(symbol, "ridge", task_key),
                     cfg=ridge_cfg,
                 ),
             )
@@ -314,7 +325,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"cls"},
                 lambda ds, task, task_key: train_rf_classifier(
                     ds,
-                    TRAINED_MODELS_DIR / "rf_cls" / symbol / task_key,
+                    _stock_model_dir(symbol, "rf_cls", task_key),
                     cfg=rf_cls_cfg,
                 ),
             )
@@ -329,7 +340,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"reg"},
                 lambda ds, task, task_key: train_rf_regressor(
                     ds,
-                    TRAINED_MODELS_DIR / "rf_reg" / symbol / task_key,
+                    _stock_model_dir(symbol, "rf_reg", task_key),
                     cfg=rf_reg_cfg,
                 ),
             )
@@ -356,7 +367,7 @@ def train_for_symbol(symbol: str) -> None:
                 {"reg", "cls"},
                 lambda ds, task, task_key: train_transformer(
                     dataset_csv=ds,
-                    out_dir=TRAINED_MODELS_DIR / "transformer" / symbol / task_key,
+                    out_dir=_stock_model_dir(symbol, "transformer", task_key),
                     task=task,
                     cfg=transformer_cfg,
                 ),

@@ -1,0 +1,19 @@
+{
+  "task": "reg",
+  "dataset": "data/datasets/AAPL.reg_ret_next.dataset.csv",
+  "seq_len": 30,
+  "batch_size": 128,
+  "epochs_ran": 20,
+  "best_val_loss": 0.0008175679939752655,
+  "test_loss": 0.002221499196510168,
+  "test_metrics": {
+    "mae": 0.03714298456907272,
+    "rmse": 0.047132784098580745,
+    "dir_acc": 0.4753623188405797
+  },
+  "val_metrics_last": {
+    "mae": 0.02252970077097416,
+    "rmse": 0.02859314573768614,
+    "dir_acc": 0.502262443438914
+  }
+}
