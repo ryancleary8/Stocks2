@@ -3,17 +3,17 @@
   "dataset": "data/datasets/AAPL.cls_bigmove.dataset.csv",
   "seq_len": 30,
   "batch_size": 128,
-  "epochs_ran": 8,
-  "best_val_loss": 0.6701070304909443,
-  "test_loss": 0.6885649268177972,
+  "epochs_ran": 10,
+  "best_val_loss": 0.6676712100861838,
+  "test_loss": 0.705272604762644,
   "test_metrics": {
-    "acc": 0.5797101449275363,
-    "auc": 0.5633178702485634,
-    "prec_at_0.60": 0.5
+    "acc": 0.5855072463768116,
+    "auc": 0.5848854116180848,
+    "prec_at_0.60": 0.5333333333333333
   },
   "val_metrics_last": {
-    "acc": 0.5158371040723982,
-    "auc": 0.5216165413533834,
-    "prec_at_0.60": 0.0
+    "acc": 0.5203619909502263,
+    "auc": 0.5099111414900888,
+    "prec_at_0.60": 0.6153846153846154
   }
 }

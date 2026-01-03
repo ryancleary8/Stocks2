@@ -160,13 +160,63 @@ def _load_model_meta(model_dir: Path) -> dict:
     return meta
 
 
-def _predict_joblib(model_path: Path, features: pd.DataFrame) -> float:
+def _fix_estimator_type(model: object, is_classifier: bool) -> None:
+    """Forcefully set _estimator_type on a model object.
+    
+    This handles cases where models were saved without proper sklearn mixins.
+    We try multiple approaches to ensure the attribute sticks.
+    """
+    est_type = "classifier" if is_classifier else "regressor"
+    
+    # If it's a Pipeline, fix the final estimator
+    if hasattr(model, 'named_steps'):
+        # It's a Pipeline - fix the last step
+        steps = list(model.named_steps.values())
+        if steps:
+            final_estimator = steps[-1]
+            _fix_estimator_type(final_estimator, is_classifier)
+            # Also set on the pipeline itself
+            model._estimator_type = est_type
+        return
+    
+    # For non-pipeline models
+    if not hasattr(model, '_estimator_type') or model._estimator_type is None:
+        # Try setting via __dict__ first (most reliable)
+        try:
+            model.__dict__['_estimator_type'] = est_type
+        except (AttributeError, TypeError):
+            pass
+        
+        # Try setattr
+        try:
+            object.__setattr__(model, '_estimator_type', est_type)
+        except (AttributeError, TypeError):
+            pass
+        
+        # Try direct attribute assignment
+        try:
+            model._estimator_type = est_type
+        except (AttributeError, TypeError):
+            pass
+
+
+def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: bool) -> float:
+    """Load and predict from a joblib model, handling _estimator_type issues."""
     model = joblib.load(model_path)
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(features)
-        # Return probability of class 1 when available
-        if proba.ndim > 1 and proba.shape[1] > 1:
-            return float(proba[:, 1][0])
+    
+    # Fix _estimator_type before any operations
+    _fix_estimator_type(model, is_classifier)
+    
+    # For classifiers, prefer predict_proba
+    if is_classifier and hasattr(model, "predict_proba"):
+        try:
+            proba = model.predict_proba(features)
+            if proba.ndim > 1 and proba.shape[1] > 1:
+                return float(proba[:, 1][0])
+        except Exception:
+            pass
+    
+    # Fall back to predict
     preds = model.predict(features)
     return float(preds[0])
 
@@ -225,7 +275,12 @@ def _make_feature_frame(row: pd.Series, feature_cols: Optional[list[str]]) -> pd
     else:
         drop_cols = {"date", "open", "high", "low", "close", "volume"}
         X = row.drop(labels=[c for c in row.index if c in drop_cols]).to_frame().T
-    return X.replace([pd.NA, float("inf"), float("-inf")], 0).fillna(0.0)
+
+    # Clean feature frame while opting into pandas' future downcasting behavior
+    with pd.option_context("future.no_silent_downcasting", True):
+        cleaned = X.replace([pd.NA, float("inf"), float("-inf")], 0)
+    cleaned = cleaned.infer_objects(copy=False)
+    return cleaned.fillna(0.0)
 
 
 def predict_for_symbol(quote: CurrentQuote) -> dict[str, float]:
@@ -255,13 +310,25 @@ def predict_for_symbol(quote: CurrentQuote) -> dict[str, float]:
             continue
 
         try:
+            if model_path.suffix.lower() in {".pt", ".pth"}:
+                print(
+                    f"⚠️  Skipping {quote.symbol} {key}: unsupported torch model format for CLI prediction"
+                )
+                continue
+
             model_type = str(meta.get("type", "")).lower()
-            if "xgb_cls" in key or "classifier" in model_type:
+            
+            # Determine if this is a classifier or regressor
+            is_classifier = ("cls" in key or "classifier" in model_type)
+            
+            if "xgb_cls" in key or model_type == "xgb_classifier":
                 preds[key] = _predict_xgb_cls(model_path, X)
-            elif "xgb_reg" in key or model_path.suffix == ".json" or "regressor" in model_type:
+            elif "xgb_reg" in key or model_type == "xgb_regressor" or model_path.suffix == ".json":
                 preds[key] = _predict_xgb_reg(model_path, X)
             else:
-                preds[key] = _predict_joblib(model_path, X)
+                # Use the fixed joblib predictor
+                preds[key] = _predict_joblib(model_path, X, is_classifier)
+                
         except Exception as exc:
             print(f"⚠️  Prediction failed for {quote.symbol} {key}: {exc}")
             continue

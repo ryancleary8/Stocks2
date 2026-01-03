@@ -3,17 +3,17 @@
   "dataset": "data/datasets/AAPL.cls_up.dataset.csv",
   "seq_len": 30,
   "batch_size": 128,
-  "epochs_ran": 7,
-  "best_val_loss": 0.6915790392802312,
-  "test_loss": 0.7256192559781282,
+  "epochs_ran": 15,
+  "best_val_loss": 0.7004797129609466,
+  "test_loss": 0.723928699977156,
   "test_metrics": {
-    "acc": 0.4608695652173913,
-    "auc": 0.5204867739296428,
-    "prec_at_0.60": 0.0
+    "acc": 0.4463768115942029,
+    "auc": 0.5097491137169348,
+    "prec_at_0.60": 0.5333333333333333
   },
   "val_metrics_last": {
-    "acc": 0.5113122171945701,
-    "auc": 0.5193379219927893,
+    "acc": 0.4796380090497738,
+    "auc": 0.4858243198951163,
     "prec_at_0.60": 0.0
   }
 }
