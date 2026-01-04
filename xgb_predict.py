@@ -24,9 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-import joblib
 import numpy as np
 import pandas as pd
+
+try:
+    import joblib
+except ImportError:  # pragma: no cover - runtime guard
+    joblib = None
 
 from features import calculate_features
 from models.xgb.xgb_classifier import XGBOpenDirectionClassifier
@@ -172,44 +176,56 @@ def _load_model_meta(model_dir: Path) -> dict:
 
 
 def _fix_estimator_type(model: object, is_classifier: bool) -> None:
-    """Forcefully set _estimator_type on a model object."""
+    """Forcefully set _estimator_type on a model object and its internals."""
+
+    if model is None:
+        return
 
     est_type = "classifier" if is_classifier else "regressor"
 
+    def _set(target: object) -> None:
+        if target is None:
+            return
+        for attr_target in (target, getattr(target, "__class__", None)):
+            if attr_target is None:
+                continue
+            try:
+                setattr(attr_target, "_estimator_type", est_type)
+            except Exception:
+                pass
+
+    _set(model)
+
+    # Patch nested pipeline steps if present
     if hasattr(model, "named_steps"):
-        steps = list(model.named_steps.values())
-        if steps:
-            final_estimator = steps[-1]
-            _fix_estimator_type(final_estimator, is_classifier)
-            model._estimator_type = est_type
-        return
-
-    if not hasattr(model, "_estimator_type") or model._estimator_type is None:
         try:
-            model.__dict__["_estimator_type"] = est_type
-        except (AttributeError, TypeError):
+            steps = list(getattr(model, "named_steps").values())
+            for step in steps:
+                _fix_estimator_type(step, is_classifier)
+        except Exception:
+            pass
+    elif hasattr(model, "steps"):
+        try:
+            for _name, step in getattr(model, "steps"):
+                _fix_estimator_type(step, is_classifier)
+        except Exception:
             pass
 
-        try:
-            object.__setattr__(model, "_estimator_type", est_type)
-        except (AttributeError, TypeError):
-            pass
-
-        try:
-            model._estimator_type = est_type
-        except (AttributeError, TypeError):
-            pass
-
+    # Some XGBoost sklearn classes expose a booster that also needs patching.
     try:
-        cls = model.__class__
-        if not hasattr(cls, "_estimator_type") or getattr(cls, "_estimator_type", None) is None:
-            setattr(cls, "_estimator_type", est_type)
+        booster = model.get_booster()
+        _set(booster)
     except Exception:
         pass
 
 
 def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: bool) -> float:
     """Load and predict from a joblib model, handling _estimator_type issues."""
+
+    if joblib is None:
+        raise ImportError(
+            "joblib is required to load model artifacts. Install with: pip install joblib"
+        )
 
     model = joblib.load(model_path)
     _fix_estimator_type(model, is_classifier)
@@ -242,18 +258,30 @@ def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: boo
 
 
 def _predict_xgb_reg(model_path: Path, features: pd.DataFrame) -> float:
-    model = XGBOpenReturnRegressor()
+    try:
+        model = XGBOpenReturnRegressor()
+    except ImportError as exc:  # pragma: no cover - runtime guard
+        raise ImportError("xgboost is required for XGB regressor inference") from exc
     _fix_estimator_type(model, is_classifier=False)
     model.load(model_path)
+    _fix_estimator_type(getattr(model, "model", None), is_classifier=False)
     return float(model.predict(features)[0])
 
 
 def _predict_xgb_cls(model_path: Path, features: pd.DataFrame) -> float:
-    model = XGBOpenDirectionClassifier()
+    try:
+        model = XGBOpenDirectionClassifier()
+    except ImportError as exc:  # pragma: no cover - runtime guard
+        raise ImportError("xgboost is required for XGB classifier inference") from exc
     _fix_estimator_type(model, is_classifier=True)
     model.load(model_path)
+    _fix_estimator_type(getattr(model, "model", None), is_classifier=True)
     proba = model.predict_proba(features)
-    return float(proba[0])
+    if getattr(proba, "ndim", 1) > 1:
+        positive = proba[:, 1]
+    else:
+        positive = proba
+    return float(positive[0])
 
 
 def _gather_model_paths(symbol: str) -> dict[str, Path]:

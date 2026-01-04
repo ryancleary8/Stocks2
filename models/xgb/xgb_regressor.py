@@ -1,20 +1,36 @@
 # models/xgb/xgb_regressor.py
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, Any
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
 
-try:
-    from xgboost import XGBRegressor
-except ImportError as e:
-    raise ImportError(
-        "Missing dependency: xgboost. Install with: pip install xgboost"
-    ) from e
+
+def _get_xgb_regressor() -> Any:
+    """Lazily import :class:`xgboost.XGBRegressor` with a clear error."""
+
+    try:
+        from xgboost import XGBRegressor  # type: ignore
+    except ImportError as exc:  # pragma: no cover - runtime guard
+        raise ImportError(
+            "Missing dependency: xgboost. Install with: pip install xgboost"
+        ) from exc
+
+    # In some environments the sklearn mixin metadata is missing or stripped
+    # during serialization. Force the estimator type on the class so instances
+    # are always recognized as regressors by sklearn utilities.
+    try:
+        if getattr(XGBRegressor, "_estimator_type", None) != "regressor":
+            XGBRegressor._estimator_type = "regressor"  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    return XGBRegressor
 
 
 def _ensure_estimator_type(obj: object, est_type: str) -> None:
@@ -88,9 +104,15 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
 
     def __init__(self, config: Optional[XGBRegressorConfig] = None):
         self.cfg = config or XGBRegressorConfig()
-        self.model: Optional[XGBRegressor] = None
+        self.model: Optional[Any] = None
         self.feature_cols: Optional[list[str]] = None
         _ensure_estimator_type(self, "regressor")
+
+    @property
+    def estimator_type(self) -> str:
+        """Expose estimator type for sklearn utilities."""
+
+        return "regressor"
 
     def _time_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -149,6 +171,8 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
 
             X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
 
+            XGBRegressor = _get_xgb_regressor()
+
             self.model = XGBRegressor(
                 n_estimators=self.cfg.n_estimators,
                 learning_rate=self.cfg.learning_rate,
@@ -177,6 +201,8 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
 
             y_series = pd.Series(y).astype(float)
             X_train, X_val, y_train, y_val = self._time_split(X_df, y_series)
+
+            XGBRegressor = _get_xgb_regressor()
 
             self.model = XGBRegressor(
                 n_estimators=self.cfg.n_estimators,
@@ -253,14 +279,21 @@ class XGBOpenReturnRegressor(BaseEstimator, RegressorMixin):
 
     def load(self, path: Union[str, Path]):
         path = Path(path)
+        XGBRegressor = _get_xgb_regressor()
+
         self.model = XGBRegressor()
         self.model.load_model(str(path))
 
         _ensure_estimator_type(self.model, "regressor")
+        try:
+            booster = self.model.get_booster()
+            _ensure_estimator_type(booster, "regressor")
+        except Exception:
+            pass
 
         meta_path = path.with_suffix(".meta.json")
-        meta = pd.read_json(meta_path.read_text(encoding="utf-8"), typ="series")
-        self.feature_cols = list(meta["feature_cols"])
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.feature_cols = list(meta.get("feature_cols", []))
         # config rehydration is optional; keep current cfg
         _ensure_estimator_type(self, "regressor")
         return self

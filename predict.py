@@ -23,10 +23,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-import joblib
+try:
+    import joblib
+except ImportError:  # pragma: no cover - runtime guard
+    joblib = None
 import numpy as np
 import pandas as pd
-import torch
+try:
+    import torch
+except ImportError:  # pragma: no cover - runtime guard
+    torch = None
 
 from features import calculate_features
 from models.xgb.xgb_classifier import XGBOpenDirectionClassifier
@@ -224,6 +230,10 @@ def _ensure_estimator_type(model: object, is_classifier: bool) -> None:
 
 def _predict_joblib(model_path: Path, features: pd.DataFrame, is_classifier: bool) -> float:
     """Load and predict from a joblib model, handling _estimator_type issues."""
+    if joblib is None:
+        raise ImportError(
+            "joblib is required to load model artifacts. Install with: pip install joblib"
+        )
     model = joblib.load(model_path)
 
     # Fix _estimator_type before any operations
@@ -280,12 +290,17 @@ def _predict_xgb_cls(model_path: Path, features: pd.DataFrame) -> float:
     _ensure_estimator_type(model, is_classifier=True)
     _ensure_estimator_type(getattr(model, "model", None), is_classifier=True)
     proba = model.predict_proba(features)
-    return float(proba[0])
+    if getattr(proba, "ndim", 1) > 1:
+        positive = proba[:, 1]
+    else:
+        positive = proba
+    return float(positive[0])
 
 
-def _load_pytorch_model(model_path: Path, model_dir: Path, model_type: str) -> torch.nn.Module:
+def _load_pytorch_model(model_path: Path, model_dir: Path, model_type: str):
     """Load a PyTorch model (CNN, LSTM, or Transformer)."""
-    
+    if torch is None:
+        raise ImportError("PyTorch is not installed; cannot load .pt/.pth models")
     # Load metadata to get model architecture info
     meta = _load_model_meta(model_dir)
     task = meta.get("task", "reg")
@@ -394,7 +409,8 @@ def _predict_pytorch(
     seq_len: int = 30
 ) -> float:
     """Predict using a PyTorch model (CNN, LSTM, or Transformer)."""
-    
+    if torch is None:
+        raise ImportError("PyTorch is not installed; cannot run .pt/.pth predictions")
     # Load the model
     model = _load_pytorch_model(model_path, model_dir, model_type)
     
@@ -519,6 +535,9 @@ def predict_for_symbol(quote: CurrentQuote) -> dict[str, float]:
             
             # Handle PyTorch models
             if model_path.suffix.lower() in {".pt", ".pth"}:
+                if torch is None:
+                    print(f"⚠️  Skipping {quote.symbol} {key}: PyTorch not installed")
+                    continue
                 # Determine model type from key
                 if "cnn" in key:
                     model_type_name = "cnn"

@@ -1,20 +1,37 @@
 # models/xgb/xgb_classifier.py
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Any
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 
-try:
-    from xgboost import XGBClassifier
-except ImportError as e:
-    raise ImportError(
-        "Missing dependency: xgboost. Install with: pip install xgboost"
-    ) from e
+
+def _get_xgb_classifier() -> Any:
+    """Lazily import :class:`xgboost.XGBClassifier` with a clear error."""
+
+    try:
+        from xgboost import XGBClassifier  # type: ignore
+    except ImportError as exc:  # pragma: no cover - runtime guard
+        raise ImportError(
+            "Missing dependency: xgboost. Install with: pip install xgboost"
+        ) from exc
+
+    # Some environments strip `_estimator_type` during serialization or ship
+    # XGBoost builds without the sklearn mixin metadata wired up. Patch the
+    # class attribute defensively so any instance advertises itself as a
+    # classifier to sklearn helpers.
+    try:
+        if getattr(XGBClassifier, "_estimator_type", None) != "classifier":
+            XGBClassifier._estimator_type = "classifier"  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    return XGBClassifier
 
 
 def _ensure_estimator_type(obj: object, est_type: str) -> None:
@@ -87,9 +104,15 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
 
     def __init__(self, config: Optional[XGBClassifierConfig] = None):
         self.cfg = config or XGBClassifierConfig()
-        self.model: Optional[XGBClassifier] = None
+        self.model: Optional[Any] = None
         self.feature_cols: Optional[list[str]] = None
         _ensure_estimator_type(self, "classifier")
+
+    @property
+    def estimator_type(self) -> str:
+        """Expose estimator type for sklearn utilities."""
+
+        return "classifier"
 
     def __sklearn_tags__(self) -> dict[str, object]:
         """
@@ -166,6 +189,8 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
             neg = (y_train == 0).sum()
             scale_pos_weight = float(neg / max(pos, 1))
 
+            XGBClassifier = _get_xgb_classifier()
+
             self.model = XGBClassifier(
                 n_estimators=self.cfg.n_estimators,
                 learning_rate=self.cfg.learning_rate,
@@ -199,6 +224,8 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
             pos = (y_train == 1).sum()
             neg = (y_train == 0).sum()
             scale_pos_weight = float(neg / max(pos, 1))
+
+            XGBClassifier = _get_xgb_classifier()
 
             self.model = XGBClassifier(
                 n_estimators=self.cfg.n_estimators,
@@ -296,17 +323,24 @@ class XGBOpenDirectionClassifier(BaseEstimator, ClassifierMixin):
         path = Path(path)
 
         # Load underlying XGBClassifier model
+        XGBClassifier = _get_xgb_classifier()
+
         self.model = XGBClassifier()
         self.model.load_model(str(path))
 
         # Ensure sklearn sees both wrapper & internal model as classifiers
         _ensure_estimator_type(self, "classifier")
         _ensure_estimator_type(self.model, "classifier")
+        try:
+            booster = self.model.get_booster()
+            _ensure_estimator_type(booster, "classifier")
+        except Exception:
+            pass
 
         # Load feature columns from metadata
         meta_path = path.with_suffix(".meta.json")
-        meta = pd.read_json(meta_path.read_text(encoding="utf-8"), typ="series")
-        self.feature_cols = list(meta["feature_cols"])
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.feature_cols = list(meta.get("feature_cols", []))
 
         # Tag self again after loading metadata
         _ensure_estimator_type(self, "classifier")
