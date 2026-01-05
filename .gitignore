@@ -4,4 +4,8 @@ __pycache__/
 .env.*
 .venv/
 data/
-
+Signals/
+predict_results/
+current/ 
+trained_models/
+.DS_Store
